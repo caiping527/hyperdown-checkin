@@ -1,4 +1,4 @@
-# Hyperdown 每日自动签到。保活见 keepalive.yml。
+# Hyperdown 每日自动签到。保活见 keepalive.yml。失败会自动创建/追加 issue 提醒。
 name: Hyperdown Check-in
 
 on:
@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   checkin:
@@ -34,3 +35,21 @@ jobs:
             exit 1
           fi
           python checkin.py
+
+      - name: Notify failure via issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh label create checkin-failure --color B60205 --description "自动签到失败提醒" 2>/dev/null || true
+          num=$(gh issue list --label checkin-failure --state open --json number --jq '.[0].number // empty')
+          LOG_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY=$(printf '@%s 自动签到失败了，请帮忙看一下～\n\n- 时间（UTC）：%s\n- 运行日志：%s\n\n常见原因对照：\n- 退出码 1：Secrets 未配置\n- 退出码 2：邮箱/密码错误（或已修改密码）\n- 退出码 3：安全封包失效（需要同步上游仓库更新）\n- 退出码 4：网络抖动（GitHub 出口偶发被掐，通常可忽略）\n\n修复后定时任务成功运行即可，本 issue 可手动关闭。' \
+            "${GITHUB_REPOSITORY_OWNER}" "$(date -u '+%Y-%m-%d %H:%M')" "${LOG_URL}")
+          if [ -z "$num" ]; then
+            gh issue create --title "⚠️ 自动签到失败，请查看运行日志" --label checkin-failure --body "$BODY" --assignee "${GITHUB_REPOSITORY_OWNER}" \
+              || gh issue create --title "⚠️ 自动签到失败，请查看运行日志" --label checkin-failure --body "$BODY"
+          else
+            gh issue comment "$num" --body "$BODY"
+          fi
