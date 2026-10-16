@@ -3,6 +3,11 @@ name: Hyperdown Check-in
 
 on:
   workflow_dispatch:
+    inputs:
+      test_wecom_notify:
+        description: "只发一条企业微信测试通知（验证通道，不影响正常签到）"
+        type: boolean
+        default: false
   schedule:
     # UTC 00:05 ≈ 北京 08:05
     - cron: "5 0 * * *"
@@ -53,3 +58,89 @@ jobs:
           else
             gh issue comment "$num" --body "$BODY"
           fi
+
+      - name: Notify via WeCom (企业微信)
+        if: failure() || inputs.test_wecom_notify == true
+        env:
+          WECOM_CORP_ID: ${{ secrets.WECOM_CORP_ID }}
+          WECOM_CORP_SECRET: ${{ secrets.WECOM_CORP_SECRET }}
+          WECOM_AGENT_ID: ${{ secrets.WECOM_AGENT_ID }}
+          WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
+          TEST_FLAG: ${{ inputs.test_wecom_notify == true && '1' || '0' }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WECOM_CORP_ID:-}" ] || [ -z "${WECOM_CORP_SECRET:-}" ] || [ -z "${WECOM_AGENT_ID:-}" ]; then
+            echo "::warning::企业微信 Secrets 未配置，跳过通知"
+            exit 0
+          fi
+          python - <<'PY'
+          import datetime
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          corp_id = os.environ["WECOM_CORP_ID"]
+          corp_secret = os.environ["WECOM_CORP_SECRET"]
+          agent_id = int(os.environ["WECOM_AGENT_ID"])
+          touser = os.environ.get("WECOM_TOUSER") or "@all"
+          run_url = os.environ.get("RUN_URL", "")
+          is_test = os.environ.get("TEST_FLAG") == "1" and os.environ.get("JOB_STATUS") == "success"
+
+          def fetch_json(url: str, body: bytes | None = None) -> dict:
+              req = urllib.request.Request(
+                  url,
+                  data=body,
+                  headers={"Content-Type": "application/json"} if body else {},
+                  method="POST" if body else "GET",
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.loads(resp.read())
+
+          query = urllib.parse.urlencode({"corpid": corp_id, "corpsecret": corp_secret})
+          token_res = fetch_json(f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{query}")
+          token = token_res.get("access_token")
+          if not token:
+              print(f"gettoken failed: {token_res}")
+              raise SystemExit(1)
+
+          ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+          if is_test:
+              content = (
+                  "【Hyperdown 签到助手】通知通道测试 ✅\n"
+                  "这是一条测试消息，收到即可忽略。\n"
+                  "以后只有自动签到失败时才会推送通知。\n"
+                  f"时间(UTC)：{ts}"
+              )
+          else:
+              content = (
+                  "【Hyperdown 自动签到失败】\n"
+                  f"时间(UTC)：{ts}\n"
+                  f"日志：{run_url}\n"
+                  "\n原因对照：\n"
+                  "· 退出码1：Secrets 未配置\n"
+                  "· 退出码2：邮箱/密码错误（改过密码？）\n"
+                  "· 退出码3：签到协议升级，需要更新代码\n"
+                  "· 退出码4：网络抖动，通常可忽略\n"
+                  "修复后下一次定时运行成功即可。"
+              )
+
+          payload = json.dumps({
+              "touser": touser,
+              "msgtype": "text",
+              "agentid": agent_id,
+              "text": {"content": content},
+              "safe": 0,
+          }).encode()
+
+          send_res = fetch_json(
+              "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token="
+              + urllib.parse.quote(token),
+              body=payload,
+          )
+          print(f"wecom send: errcode={send_res.get('errcode')} errmsg={send_res.get('errmsg')}")
+          if send_res.get("errcode") != 0:
+              raise SystemExit(1)
+          PY
