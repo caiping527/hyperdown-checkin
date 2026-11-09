@@ -9,8 +9,8 @@ on:
         type: boolean
         default: false
   schedule:
-    # UTC 00:05 ≈ 北京 08:05
-    - cron: "5 0 * * *"
+    # UTC 17:21 = 北京 01:21；五个项目错峰，避开 UTC 00~02 调度高峰
+    - cron: "21 17 * * *"
 
 permissions:
   contents: read
